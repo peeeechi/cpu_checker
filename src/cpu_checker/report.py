@@ -20,6 +20,7 @@ def build_report(
     include_unmapped: bool = True,
     top_n: int = 15,
 ) -> list[PidGroup]:
+    out_html.parent.mkdir(parents=True, exist_ok=True)
     session = parse_launch_session(launch_path) if launch_path else LaunchSession()
     nodes = parse_launch_log(launch_path) if launch_path else []
     samples = []

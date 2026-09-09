@@ -61,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         launch_path = _optional_launch_path(args.launch)
         print(f"launch={launch_path}" if launch_path else "launch=(none)")
         out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
         groups = build_report(
             launch_path=launch_path,
             top_path=Path(args.top) if args.top else None,
@@ -74,9 +75,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "collect":
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
         print("sampling all /proc PIDs")
         samples = sample_proc(interval_sec=args.interval, duration_sec=args.duration)
-        out = Path(args.out)
         write_samples(samples, out)
         print(f"wrote {out} ({len(samples)} samples)")
         return 0
