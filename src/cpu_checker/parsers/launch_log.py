@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -36,19 +37,26 @@ def resolve_launch_path(path: Path | None = None) -> Path:
 
     - ファイル → そのまま
     - セッションディレクトリ（中に launch.log）→ その launch.log
-    - ~/.ros/log など（*/launch.log が並ぶ）→ 更新が一番新しいもの
+    - ログ親ディレクトリ（*/launch.log が並ぶ）→ 更新が一番新しいもの
     - 省略 → ~/.ros/log
     """
     target = path.expanduser() if path is not None else Path.home() / ".ros" / "log"
-    if target.is_file():
-        return target
-    if target.is_dir():
-        direct = target / "launch.log"
-        if direct.is_file():
-            return direct
-        newest = max(target.glob("*/launch.log"), key=lambda item: item.stat().st_mtime, default=None)
-        if newest is not None:
-            return newest
+    try:
+        if target.is_file():
+            return target
+        if target.is_dir():
+            direct = target / "launch.log"
+            if direct.is_file():
+                return direct
+            newest = max(
+                target.glob("*/launch.log"),
+                key=lambda item: item.stat().st_mtime,
+                default=None,
+            )
+            if newest is not None:
+                return newest
+    except PermissionError as exc:
+        raise PermissionError(f"launch ログを読めない: {target}（権限不足）") from exc
     raise FileNotFoundError(f"launch.log が見つからない: {target}")
 
 
@@ -208,14 +216,25 @@ def _merge_process_logs(
     session_dir = Path(ros_log_dir)
     search_dirs = []
     for candidate in (session_dir.parent, session_dir):
-        if candidate.is_dir() and candidate not in search_dirs:
+        try:
+            readable = candidate.is_dir()
+        except PermissionError:
+            print(f"warning: プロセスログを読めない: {candidate}", file=sys.stderr)
+            continue
+        if readable and candidate not in search_dirs:
             search_dirs.append(candidate)
     if not search_dirs:
+        print(f"warning: プロセスログディレクトリに入れない: {ros_log_dir}", file=sys.stderr)
         return
 
     pid_to_key = {pid: key for key, pid in processes.items()}
     for directory in search_dirs:
-        for path in directory.glob("*.log"):
+        try:
+            paths = list(directory.glob("*.log"))
+        except PermissionError:
+            print(f"warning: プロセスログを読めない: {directory}", file=sys.stderr)
+            continue
+        for path in paths:
             matched = RE_PROC_LOG.match(path.name)
             if not matched:
                 continue

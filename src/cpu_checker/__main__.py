@@ -14,13 +14,11 @@ DEFAULT_LAUNCH = str(Path.home() / ".ros" / "log")
 
 
 def _optional_launch_path(raw: str) -> Path | None:
-    """`--launch` を launch.log に直す。省略時に公式ログが無ければ None。"""
-    target = Path(raw)
-    is_default = raw == DEFAULT_LAUNCH
+    """`--launch` を launch.log に直す。省略時の場所に無ければ None。"""
     try:
-        return resolve_launch_path(target)
+        return resolve_launch_path(Path(raw))
     except FileNotFoundError:
-        if is_default:
+        if raw == DEFAULT_LAUNCH:
             return None
         raise
 
@@ -36,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument(
         "--launch",
         default=DEFAULT_LAUNCH,
-        help="公式 launch.log、そのセッションディレクトリ、または ~/.ros/log（省略時は最新。無ければスキップ）",
+        help="公式 launch.log、セッションディレクトリ、またはログ親ディレクトリ（省略時は ~/.ros/log）",
     )
     report.add_argument("--top", help="top バッチログ、または collect の CSV")
     report.add_argument("--out", default="output/report.html", help="HTML 出力先")
