@@ -7,24 +7,32 @@ from pathlib import Path
 
 from cpu_checker.join import join_by_pid, unmapped_nodes
 from cpu_checker.models import LaunchSession, NodeProcess, PidGroup
-from cpu_checker.parsers.launch_log import parse_launch_log, parse_launch_session
+from cpu_checker.parsers.launch_log import parse_launch_logs, parse_launch_sessions
 from cpu_checker.parsers.top_log import parse_top_log
 from cpu_checker.util import affinity_label, format_core_map, per_core_cpu, saturated_cores, used_core_label
 from cpu_checker.visualize import write_report
 
 
 def build_report(
-    launch_path: Path | None,
+    launch_paths: list[Path] | Path | None,
     top_path: Path | None,
     out_html: Path,
     include_unmapped: bool = True,
     top_n: int = 15,
 ) -> list[PidGroup]:
     out_html.parent.mkdir(parents=True, exist_ok=True)
-    session = parse_launch_session(launch_path) if launch_path else LaunchSession()
-    nodes = parse_launch_log(launch_path) if launch_path else []
+    if isinstance(launch_paths, Path):
+        launch_paths = [launch_paths]
+    paths = launch_paths or []
+    session = parse_launch_sessions(paths) if paths else LaunchSession()
+    nodes = parse_launch_logs(paths) if paths else []
     samples = []
-    notes = [f"launch={launch_path.name}" if launch_path else "launch=(none)"]
+    if not paths:
+        notes = ["launch=(none)"]
+    elif len(paths) == 1:
+        notes = [f"launch={paths[0].name}"]
+    else:
+        notes = [f"launch={len(paths)} files ({paths[0].parent.name} … {paths[-1].parent.name})"]
     if top_path is not None:
         samples = parse_top_log(top_path, date_hint=session.started_at)
         notes.append(f"top={top_path.name} ({len(samples)} samples)")

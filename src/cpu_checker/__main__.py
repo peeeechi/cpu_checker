@@ -7,19 +7,19 @@ import sys
 from pathlib import Path
 
 from cpu_checker.collect import sample_proc, write_samples
-from cpu_checker.parsers.launch_log import resolve_launch_path
+from cpu_checker.parsers.launch_log import list_launch_logs
 from cpu_checker.report import build_report
 
 DEFAULT_LAUNCH = str(Path.home() / ".ros" / "log")
 
 
-def _optional_launch_path(raw: str) -> Path | None:
-    """`--launch` を launch.log に直す。省略時の場所に無ければ None。"""
+def _optional_launch_paths(raw: str) -> list[Path]:
+    """`--launch` を launch.log のリストに直す。省略時の場所に無ければ空。"""
     try:
-        return resolve_launch_path(Path(raw))
+        return list_launch_logs(Path(raw))
     except FileNotFoundError:
         if raw == DEFAULT_LAUNCH:
-            return None
+            return []
         raise
 
 
@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     report.add_argument(
         "--launch",
         default=DEFAULT_LAUNCH,
-        help="公式 launch.log、セッションディレクトリ、またはログ親ディレクトリ（省略時は ~/.ros/log）",
+        help="公式 launch.log、またはそれが入ったディレクトリ（中の全 launch.log を時刻順にマージ。省略時は ~/.ros/log）",
     )
     report.add_argument("--top", help="top バッチログ、または collect の CSV")
     report.add_argument("--out", default="output/report.html", help="HTML 出力先")
@@ -56,12 +56,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "report":
-        launch_path = _optional_launch_path(args.launch)
-        print(f"launch={launch_path}" if launch_path else "launch=(none)")
+        launch_paths = _optional_launch_paths(args.launch)
+        if not launch_paths:
+            print("launch=(none)")
+        elif len(launch_paths) == 1:
+            print(f"launch={launch_paths[0]}")
+        else:
+            print(f"launch={len(launch_paths)} files")
+            for item in launch_paths:
+                print(f"  {item}")
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         groups = build_report(
-            launch_path=launch_path,
+            launch_paths=launch_paths,
             top_path=Path(args.top) if args.top else None,
             out_html=out,
             include_unmapped=not args.ros_only,

@@ -7,7 +7,7 @@
 - キーは PID。Composable は 1 PID に複数 Node
 - `%CPU` は 1 コア = 100%
 - `collect` はマシン上の全プロセスを取る。launch ログは不要
-- `report` の `--launch` で公式ログの場所を指定する。省略時は `~/.ros/log` の最新 `launch.log`。無ければスキップ
+- `report` の `--launch` で公式ログの場所を指定する。ディレクトリなら中の全 `launch.log` を時刻順にマージ。省略時は `~/.ros/log`。無ければスキップ
 
 コマンドは 2 つ。`collect` は実行中にコア情報を取る。`report` はあとから HTML を出す。
 
@@ -47,10 +47,11 @@ PYTHONPATH=src python3 -m cpu_checker report --top logs/samples.csv --out output
 PYTHONPATH=src python3 -m cpu_checker report --out output/report.html
 ```
 
-ログの場所を切り替えるとき（`--launch`）:
- ROS が root のときは `/root/.ros/log` を渡す。読めなければ `sudo` で実行する。
+ログの場所を切り替えるとき（`--launch`）。ディレクトリを渡すと、配下の全 `launch.log` を起動日時順にマージする（Autoware が 1 回の起動で複数書く場合）。その起動のログだけが入ったディレクトリを渡す。
 
 ```bash
+./report.sh /root/.ros/log
+
 sudo PYTHONPATH=src .venv/bin/python3 -m cpu_checker report \
   --launch /root/.ros/log \
   --top logs/process.csv \

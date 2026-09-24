@@ -14,17 +14,23 @@ from cpu_checker.util import logger_to_path, names_match_container
 RE_ROS_LOG_DIR = re.compile(r"All log files can be found below (.+)$")
 # ~/.ros/log/*/launch.log は行頭に秒.小数が付く。tee した stdout には付かない。
 RE_FILE_TS = re.compile(r"^\d+\.\d+\s+")
+RE_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 RE_PROCESS_STARTED = re.compile(
     r"^\[INFO\] \[(.+)-(\d+)\]: process started with pid \[(\d+)\]"
 )
 RE_LOADED = re.compile(r"Loaded node '([^']+)' in container '([^']+)'")
+# [name-N] [INFO] [ts] [logger]:  または  [name-N] [INFO ts] [logger] message
 RE_PREFIX_LOGGER = re.compile(
-    r"^\[(.+)-(\d+)\]\s+\[(?:INFO|WARN|ERROR|DEBUG|FATAL)\]"
-    r"(?:\s+\[[0-9.]+\])?\s+\[([^\]]+)\]:"
+    r"^\[(.+)-(\d+)\]\s+"
+    r"\[(?:INFO|WARN|ERROR|DEBUG|FATAL)(?:\s+[0-9.]+)?\]"
+    r"(?:\s+\[[0-9.]+\])?"
+    r"\s+\[([^\]]+)\]"
 )
-# ~/.ros/log/{exec}_{pid}_{ts}.log の本体。launch 接頭辞は無い。
+# [INFO] [ts] [logger]:  または  [INFO ts] [logger] message
 RE_ROS_LOGGER = re.compile(
-    r"^\[(?:INFO|WARN|ERROR|DEBUG|FATAL)\]\s+\[[0-9.]+\]\s+\[([^\]]+)\]:"
+    r"^\[(?:INFO|WARN|ERROR|DEBUG|FATAL)(?:\s+[0-9.]+)?\]"
+    r"(?:\s+\[[0-9.]+\])?"
+    r"\s+\[([^\]]+)\]"
 )
 RE_PROC_LOG = re.compile(r"^(.+)_(\d+)_(\d+)\.log$")
 RE_SESSION_STAMP = re.compile(
@@ -32,32 +38,43 @@ RE_SESSION_STAMP = re.compile(
 )
 
 
-def resolve_launch_path(path: Path | None = None) -> Path:
-    """公式ログの場所を launch.log ファイルに直す。
+def _launch_log_sort_key(path: Path) -> tuple[datetime, float, str]:
+    """時系列ソート用。ディレクトリ名の起動日時があればそれを優先し、なければ mtime。"""
+    mtime = path.stat().st_mtime
+    for name in (path.parent.name, path.name):
+        stamp = RE_SESSION_STAMP.search(name)
+        if stamp:
+            started = datetime.strptime(
+                f"{stamp.group(1)} {stamp.group(2)}:{stamp.group(3)}:{stamp.group(4)}",
+                "%Y-%m-%d %H:%M:%S",
+            )
+            return (started, mtime, str(path))
+    return (datetime.fromtimestamp(mtime), mtime, str(path))
 
-    - ファイル → そのまま
-    - セッションディレクトリ（中に launch.log）→ その launch.log
-    - ログ親ディレクトリ（*/launch.log が並ぶ）→ 更新が一番新しいもの
+
+def list_launch_logs(path: Path | None = None) -> list[Path]:
+    """`--launch` を launch.log のリストに直す。ディレクトリなら中の全ファイルを時刻順。
+
+    - ファイル → その 1 本
+    - ディレクトリ → 配下の全ての `launch.log`（再帰）。起動日時 → mtime の順
     - 省略 → ~/.ros/log
     """
     target = path.expanduser() if path is not None else Path.home() / ".ros" / "log"
     try:
         if target.is_file():
-            return target
+            return [target]
         if target.is_dir():
-            direct = target / "launch.log"
-            if direct.is_file():
-                return direct
-            newest = max(
-                target.glob("*/launch.log"),
-                key=lambda item: item.stat().st_mtime,
-                default=None,
-            )
-            if newest is not None:
-                return newest
+            found = [item for item in target.rglob("launch.log") if item.is_file()]
+            if found:
+                return sorted(found, key=_launch_log_sort_key)
     except PermissionError as exc:
         raise PermissionError(f"launch ログを読めない: {target}（権限不足）") from exc
     raise FileNotFoundError(f"launch.log が見つからない: {target}")
+
+
+def resolve_launch_path(path: Path | None = None) -> Path:
+    """公式ログの場所を launch.log 1 本に直す（互換）。複数あるときは先頭（最古）。"""
+    return list_launch_logs(path)[0]
 
 
 def parse_launch_session(path: Path) -> LaunchSession:
@@ -84,6 +101,45 @@ def parse_launch_session(path: Path) -> LaunchSession:
     return LaunchSession(started_at=started_at, ros_log_dir=ros_log_dir, host=host)
 
 
+def parse_launch_sessions(paths: list[Path]) -> LaunchSession:
+    """複数 launch.log のセッション。起動日時は一番早いもの。"""
+    if not paths:
+        return LaunchSession()
+    sessions = [parse_launch_session(path) for path in paths]
+    started = [item.started_at for item in sessions if item.started_at]
+    first = sessions[0]
+    return LaunchSession(
+        started_at=min(started) if started else None,
+        ros_log_dir=first.ros_log_dir,
+        host=next((item.host for item in sessions if item.host), None),
+    )
+
+
+def parse_launch_logs(paths: list[Path]) -> list[NodeProcess]:
+    """複数の launch.log を時刻順にパースして NodeProcess を結合する。"""
+    composable: dict[tuple[str, str], NodeProcess] = {}
+    composable_order: list[tuple[str, str]] = []
+    standalone: list[NodeProcess] = []
+    seen_standalone: set[tuple[int, str]] = set()
+    for path in paths:
+        for node in parse_launch_log(path):
+            if node.container_name:
+                ident = (node.node_name, node.container_name)
+                prev = composable.get(ident)
+                if prev is None:
+                    composable[ident] = node
+                    composable_order.append(ident)
+                elif prev.pid < 0 and node.pid > 0:
+                    composable[ident] = node
+                continue
+            key = (node.pid, node.node_name)
+            if key in seen_standalone:
+                continue
+            seen_standalone.add(key)
+            standalone.append(node)
+    return [composable[ident] for ident in composable_order] + standalone
+
+
 def parse_launch_log(path: Path) -> list[NodeProcess]:
     """`process started` / `Loaded node` / コンテナロガー行を読んで結合する。"""
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -93,7 +149,7 @@ def parse_launch_log(path: Path) -> list[NodeProcess]:
     loggers: dict[tuple[str, int], list[str]] = defaultdict(list)
 
     for raw in lines:
-        line = RE_FILE_TS.sub("", raw, count=1)
+        line = RE_ANSI.sub("", RE_FILE_TS.sub("", raw, count=1))
         started = RE_PROCESS_STARTED.search(line)
         if started:
             key = (started.group(1), int(started.group(2)))
@@ -111,7 +167,7 @@ def parse_launch_log(path: Path) -> list[NodeProcess]:
                 loggers[key].append(logger_name)
 
     session = parse_launch_session(path)
-    _merge_process_logs(loggers, processes, session.ros_log_dir)
+    _merge_process_logs(loggers, processes, session.ros_log_dir, launch_log_path=path)
 
     containers = {container for _, container in loaded}
     node_to_container = {node_name: container for node_name, container in loaded}
@@ -204,27 +260,41 @@ def _merge_process_logs(
     loggers: dict[tuple[str, int], list[str]],
     processes: dict[tuple[str, int], int],
     ros_log_dir: str | None,
+    launch_log_path: Path | None = None,
 ) -> None:
     """セッション隣の {exec}_{pid}_{ts}.log からロガー名を足す。
 
     launch.log には子プロセスの stdout が一部しか残らない。
     rclcpp は ~/.ros/log/ 直下（セッションディレクトリの親）に書く。
     ファイル名の実行名は python3 など実体なので、PID だけで探す。
+    コピーしたログでは、launch.log の親（--launch で渡したディレクトリ）も探す。
     """
-    if not ros_log_dir:
-        return
-    session_dir = Path(ros_log_dir)
+    candidates: list[Path] = []
+    if ros_log_dir:
+        session_dir = Path(ros_log_dir)
+        candidates.extend([session_dir.parent, session_dir])
+    if launch_log_path is not None:
+        here = launch_log_path.parent
+        candidates.extend([here, here.parent])
     search_dirs = []
-    for candidate in (session_dir.parent, session_dir):
+    denied: list[Path] = []
+    for candidate in candidates:
         try:
             readable = candidate.is_dir()
         except PermissionError:
-            print(f"warning: プロセスログを読めない: {candidate}", file=sys.stderr)
+            denied.append(candidate)
             continue
         if readable and candidate not in search_dirs:
             search_dirs.append(candidate)
     if not search_dirs:
-        print(f"warning: プロセスログディレクトリに入れない: {ros_log_dir}", file=sys.stderr)
+        for item in denied:
+            print(f"warning: プロセスログを読めない: {item}", file=sys.stderr)
+    if not search_dirs:
+        if ros_log_dir or launch_log_path:
+            print(
+                f"warning: プロセスログディレクトリに入れない: {ros_log_dir or launch_log_path}",
+                file=sys.stderr,
+            )
         return
 
     pid_to_key = {pid: key for key, pid in processes.items()}
@@ -250,7 +320,8 @@ def _merge_process_logs(
 def _loggers_from_process_file(path: Path) -> list[str]:
     names: list[str] = []
     text = path.read_text(encoding="utf-8", errors="replace")
-    for line in text.splitlines():
+    for raw in text.splitlines():
+        line = RE_ANSI.sub("", raw)
         matched = RE_ROS_LOGGER.search(line)
         if not matched:
             continue
