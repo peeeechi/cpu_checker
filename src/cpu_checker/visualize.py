@@ -1,4 +1,4 @@
-"""PidGroup からレポート用データを組み立て、Jinja2 で HTML を書く。"""
+"""PidGroup からレポート用データを組み立て、Jinja2 で HTML に埋め込む。"""
 
 from __future__ import annotations
 
@@ -41,8 +41,10 @@ def write_report(
     env = Environment(
         loader=FileSystemLoader(TEMPLATE_DIR),
         autoescape=select_autoescape(["html", "xml"]),
+        variable_start_string="[[",
+        variable_end_string="]]",
     )
-    html = env.get_template("report.html").render(context)
+    html = env.get_template("report.html").render(report=context)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")
 
